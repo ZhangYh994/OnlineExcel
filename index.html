@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel模拟器</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="excel-container">
+        <div class="toolbar">
+            <button id="addRow">添加行</button>
+            <button id="addColumn">添加列</button>
+            <span class="separator">|</span>
+            <span>行数：</span>
+            <input type="number" id="rowCount" value="100" min="1" max="1000" title="请输入行数" placeholder="行数">
+            <span>列数：</span>
+            <input type="number" id="colCount" value="100" min="1" max="1000" title="请输入列数" placeholder="列数">
+            <button id="regenerate">重新生成</button>
+        </div>
+        
+        <div class="excel-wrapper">
+            <!-- 左上角空白区域 -->
+            <div class="corner-cell"></div>
+            
+            <!-- 列头区域 -->
+            <div class="column-headers" id="columnHeaders"></div>
+            
+            <!-- 行头区域 -->
+            <div class="row-headers" id="rowHeaders"></div>
+            
+            <!-- 主表格区域 -->
+            <div class="table-container" id="tableContainer">
+                <table class="excel-table" id="excelTable">
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div class="context-menu" id="contextMenu">
+        <div class="menu-item" data-action="insertRowAbove">在上方插入行</div>
+        <div class="menu-item" data-action="insertRowBelow">在下方插入行</div>
+        <div class="menu-item" data-action="deleteRow">删除行</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" data-action="insertColumnLeft">在左侧插入列</div>
+        <div class="menu-item" data-action="insertColumnRight">在右侧插入列</div>
+        <div class="menu-item" data-action="deleteColumn">删除列</div>
+        <div class="menu-separator"></div>
+        <div class="menu-item" data-action="copy">复制</div>
+        <div class="menu-item" data-action="paste">粘贴</div>
+        <div class="menu-item" data-action="clear">清除内容</div>
+    </div>
+
+    <!-- 单元格编辑器 -->
+    <input type="text" class="cell-editor" id="cellEditor" title="编辑单元格内容" placeholder="请输入内容">
+
+    <script src="script.js"></script>
+</body>
+</html>
