@@ -43,7 +43,7 @@ body {
 }
 
 .toolbar input {
-    width: 60px;
+    width: 80px;
     padding: 4px 6px;
     border: 1px solid #ccc;
     border-radius: 3px;
@@ -52,6 +52,12 @@ body {
 .separator {
     margin: 0 10px;
     color: #ccc;
+}
+
+.info {
+    color: #28a745;
+    font-size: 11px;
+    font-weight: 500;
 }
 
 /* Excel包装器 */
@@ -79,17 +85,11 @@ body {
 .column-headers {
     background: #e9ecef;
     border-bottom: 1px solid #dee2e6;
-    display: flex;
     overflow: hidden;
     position: sticky;
     top: 0;
     z-index: 5;
-    scrollbar-width: none; 
-    -ms-overflow-style: none; 
-}
-
-.column-headers::-webkit-scrollbar {
-    display: none; 
+    /* position: relative; */
 }
 
 .column-header {
@@ -101,12 +101,13 @@ body {
     align-items: center;
     justify-content: center;
     font-weight: 600;
-    font-size: 12px;
+    font-size: 16px;
     cursor: pointer;
-    -webkit-user-select: none; 
-    user-select: none;
-    position: relative;
-    flex-shrink: 0;
+    -webkit-user-select: none;    /* 兼容Safari和iOS，禁止文字选择 */
+    user-select: none;            /* 禁止文字选择，避免拖拽时误选文字 */
+    position: absolute;
+    background: #e9ecef;
+    top: 0;
 }
 
 .column-header:hover {
@@ -133,12 +134,11 @@ body {
     cursor: col-resize;
     background: transparent;
     z-index: 20;
-    pointer-events: auto;
 }
 
-.column-resize-handle:hover {
+/* .column-resize-handle:hover {
     background: rgba(0, 120, 212, 0.3);
-}
+} */
 
 /* 行头区域 */
 .row-headers {
@@ -148,12 +148,7 @@ body {
     position: sticky;
     left: 0;
     z-index: 5;
-    scrollbar-width: none; 
-    -ms-overflow-style: none; 
-}
-
-.row-headers::-webkit-scrollbar {
-    display: none; 
+    /* position: relative; */
 }
 
 .row-header {
@@ -164,11 +159,13 @@ body {
     align-items: center;
     justify-content: center;
     font-weight: 600;
-    font-size: 12px;
+    font-size: 16px;
     cursor: pointer;
-    -webkit-user-select: none;
-    user-select: none;
-    position: relative;
+    -webkit-user-select: none;    /* 兼容Safari和iOS，禁止文字选择 */
+    user-select: none;            /* 禁止文字选择，避免拖拽时误选文字 */
+    position: absolute;
+    background: #e9ecef;
+    left: 0;
 }
 
 .row-header:hover {
@@ -195,18 +192,24 @@ body {
     cursor: row-resize;
     background: transparent;
     z-index: 20;
-    pointer-events: auto;
 }
 
-.row-resize-handle:hover {
+/* .row-resize-handle:hover {
     background: rgba(0, 120, 212, 0.3);
-}
+} */
 
 /* 表格容器 */
 .table-container {
     overflow: visible;
     position: relative;
     z-index: 1;
+    background: white;
+}
+
+/* 虚拟容器 */
+.virtual-container {
+    position: relative;
+    overflow: hidden;
 }
 
 /* Excel表格 */
@@ -214,23 +217,31 @@ body {
     border-collapse: separate;
     border-spacing: 0;
     table-layout: fixed;
+    position: absolute;
+    top: 0;
+    left: 0;
 }
 
 .excel-table td {
-    width: 80px;
-    min-width: 30px;
-    height: 25px;
     border-right: 1px solid #dee2e6;
     border-bottom: 1px solid #dee2e6;
     padding: 2px 4px;
-    font-size: 12px;
+    font-size: 16px;
     cursor: cell;
-    -webkit-user-select: none; 
-    user-select: none;
-    vertical-align: middle;
+    -webkit-user-select: none;    /* 兼容Safari和iOS，禁止文字选择 */
+    user-select: none;            /* 禁止文字选择，避免拖拽时误选文字 */
+    /* vertical-align: middle; */
+
+    display: flex;
+    align-items: center;   /* 垂直居中 */
+    justify-content: flex-end; /* 水平左对齐，如需水平居中可用center */
+
     background: white;
-    position: relative;
+    position: absolute;
     box-sizing: border-box;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .excel-table td:hover {
@@ -245,6 +256,8 @@ body {
 
 .excel-table td.multi-selected {
     background: #e6f3ff;
+    border: 1px solid #0078d4;
+    z-index: 5;
 }
 
 .excel-table td.editing {
@@ -258,9 +271,9 @@ body {
 /* 单元格编辑器 */
 .cell-editor {
     position: fixed;
-    border: 2px solid #0078d4;
+    border: 1px solid #0078d4;
     outline: none;
-    font-size: 12px;
+    font-size: 16px;
     padding: 2px 4px;
     z-index: 500;
     background: white;
@@ -276,7 +289,7 @@ body {
     border-radius: 4px;
     box-shadow: 0 4px 12px rgba(0,0,0,0.2);
     z-index: 10000;
-    min-width: 160px;
+    min-width: 120px;
     display: none;
     font-size: 13px;
 }
@@ -301,44 +314,6 @@ body {
     margin: 2px 0;
 }
 
-/* 选择区域高亮 */
-.selection-highlight {
-    position: absolute;
-    background: rgba(0, 120, 212, 0.2);
-    border: 2px solid #0078d4;
-    pointer-events: none;
-    z-index: 5;
-}
-
-/* 响应式设计 */
-@media (max-width: 768px) {
-    .toolbar {
-        flex-wrap: wrap;
-        gap: 5px;
-    }
-    
-    .toolbar input {
-        width: 50px;
-    }
-    
-    .excel-table td {
-        width: 60px;
-        min-width: 30px;
-        font-size: 11px;
-    }
-    
-    .column-header {
-        min-width: 30px;
-        width: 60px;
-        font-size: 11px;
-    }
-    
-    .row-header {
-        width: 45px;
-        font-size: 11px;
-    }
-}
-
 /* 滚动条样式 */
 .excel-wrapper::-webkit-scrollbar {
     width: 12px;
@@ -358,6 +333,47 @@ body {
     background: #a8a8a8;
 }
 
+/* 性能优化相关 */
+.excel-table tr {
+    will-change: transform;
+}
+
+.excel-table td {
+    will-change: transform;
+    border-right: 1px solid #dee2e6;
+    border-bottom: 1px solid #dee2e6;
+}
+
+/* 虚拟滚动优化 */
+.virtual-container {
+    contain: layout style paint;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .toolbar {
+        flex-wrap: wrap;
+        gap: 5px;
+    }
+    
+    .toolbar input {
+        width: 60px;
+    }
+    
+    .excel-table td {
+        font-size: 11px;
+    }
+    
+    .column-header {
+        font-size: 11px;
+    }
+    
+    .row-header {
+        width: 45px;
+        font-size: 11px;
+    }
+}
+
 /* 加载状态 */
 .loading {
     display: flex;
@@ -365,28 +381,13 @@ body {
     justify-content: center;
     font-size: 14px;
     color: #666;
+    padding: 20px;
 }
 
-/* 性能优化：虚拟化支持 */
-.virtual-row {
-    position: absolute;
-    left: 0;
-    right: 0;
-    will-change: transform;
-}
-
-.virtual-container {
-    position: relative;
-    overflow: hidden;
-}
-
-/* 拖拽状态 */
-.dragging {
-    opacity: 0.5;
-}
-
-.drag-over {
-    background: #e6f3ff !important;
+/* 高性能渲染 */
+.excel-table {
+    transform: translateZ(0);
+    backface-visibility: hidden;
 }
 
 /* 复制状态 */
