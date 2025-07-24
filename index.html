@@ -3,20 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Excel模拟器</title>
+    <title>虚拟Excel模拟器</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="excel-container">
         <div class="toolbar">
-            <button id="addRow">添加行</button>
-            <button id="addColumn">添加列</button>
+            <button id="addRow">添加更多行</button>
+            <button id="addColumn">添加更多列</button>
             <span class="separator">|</span>
-            <span>行数：</span>
-            <input type="number" id="rowCount" value="100" min="1" max="1000" title="请输入行数" placeholder="行数">
-            <span>列数：</span>
-            <input type="number" id="colCount" value="100" min="1" max="1000" title="请输入列数" placeholder="列数">
+            <span>最小行数：</span>
+            <input type="number" id="rowCount" value="100" min="50" max="10000" aria-hidden="true">
+            <span>最小列数：</span>
+            <input type="number" id="colCount" value="26" min="10" max="1000" aria-hidden="true">
             <button id="regenerate">重新生成</button>
+            <span class="separator">|</span>
+            <span class="info">使用虚拟滚动 - 滚动自动扩展</span>
         </div>
         
         <div class="excel-wrapper">
@@ -31,9 +33,7 @@
             
             <!-- 主表格区域 -->
             <div class="table-container" id="tableContainer">
-                <table class="excel-table" id="excelTable">
-                    <tbody id="tableBody"></tbody>
-                </table>
+                <!-- 虚拟容器将在这里动态创建 -->
             </div>
         </div>
     </div>
@@ -54,7 +54,7 @@
     </div>
 
     <!-- 单元格编辑器 -->
-    <input type="text" class="cell-editor" id="cellEditor" title="编辑单元格内容" placeholder="请输入内容">
+    <input type="text" class="cell-editor" id="cellEditor" aria-hidden="true">
 
     <script src="script.js"></script>
 </body>
