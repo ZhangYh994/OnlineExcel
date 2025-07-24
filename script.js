@@ -1,53 +1,79 @@
 /**
- * Excel模拟器主类
- * 实现Excel的基本功能：单元格编辑、行列操作、右键菜单等
+ * 虚拟Excel模拟器
+ * 使用虚拟滚动技术，只渲染可见区域的单元格
+ * 动态生成行列，提升性能
  */
-class ExcelSimulator {
+class VirtualExcelSimulator {
     constructor(container, options = {}) {
         this.container = container;
         this.options = {
-            rows: options.rows || 100,
-            columns: options.columns || 100,
-            defaultRowHeight: 30,
-            defaultColumnWidth: 100,
+            defaultRowHeight: 40,
+            defaultColumnWidth: 120,
+            visibleRowBuffer: 5,  // 可见区域外缓冲的行数
+            visibleColumnBuffer: 3, // 可见区域外缓冲的列数
+            minRows: 100,
+            minColumns: 26,
+            maxRows: 10000,
+            maxColumns: 1000,
             ...options
         };
         
         // 数据存储
         this.data = new Map(); // 存储单元格数据
+        this.modifiedCells = new Set(); // 记录被修改过的单元格
         this.selectedCells = new Set(); // 当前选中的单元格
         this.clipboard = null; // 剪贴板数据
-        this.isSelecting = false; // 是否正在选择
-        this.selectionStart = null; // 选择起始位置
+        
+        // 虚拟滚动相关
+        this.scrollTop = 0;
+        this.scrollLeft = 0;
+        this.containerWidth = 0;
+        this.containerHeight = 0;
+        this.visibleStartRow = 0;
+        this.visibleEndRow = 0;
+        this.visibleStartColumn = 0;
+        this.visibleEndColumn = 0;
+        
+        // 行列尺寸
+        this.rowHeights = new Array(this.options.minRows).fill(this.options.defaultRowHeight);
+        this.columnWidths = new Array(this.options.minColumns).fill(this.options.defaultColumnWidth);
+        this.rowOffsets = [0]; // 行的累积偏移量
+        this.columnOffsets = [0]; // 列的累积偏移量
         
         // DOM元素引用
         this.elements = {};
-    
-        // 编辑状态
+        
+        // 编辑和选择状态
         this.editingCell = null;
         this.cellEditor = null;
+        this.isSelecting = false;
+        this.selectionStart = null;
         
         // 调整大小相关
         this.isResizing = false;
-        this.resizeType = null; // 'row' or 'column'
+        this.resizeType = null;
         this.resizeIndex = null;
-        this.resizeAnimationFrame = null; // 用于节流的动画帧ID
-        this.cachedResizeElements = null; // 缓存resize时需要操作的DOM元素
-        
-        // 行列尺寸
-        this.rowHeights = new Array(this.options.rows).fill(this.options.defaultRowHeight);
-        this.columnWidths = new Array(this.options.columns).fill(this.options.defaultColumnWidth);
+        this.resizeAnimationFrame = null;
+        this.scrollAnimationFrame = null;
+        this.selectionAnimationFrame = null; // 添加选择操作的动画帧
         
         this.init();
     }
     
     /**
-     * 初始化Excel模拟器
+     * 初始化
      */
     init() {
         this.createStructure();
         this.bindEvents();
-        this.generateTable();
+        this.calculateOffsets();
+        this.updateContainerSize();
+        // 延迟渲染以确保DOM准备就绪
+        setTimeout(() => {
+            this.calculateVisibleRange();
+            this.renderVisibleCells();
+            this.updateHeadersPosition();
+        }, 0);
     }
     
     /**
@@ -60,6 +86,22 @@ class ExcelSimulator {
         this.elements.tableBody = document.getElementById('tableBody');
         this.elements.contextMenu = document.getElementById('contextMenu');
         this.cellEditor = document.getElementById('cellEditor');
+        
+        // 创建虚拟滚动容器
+        this.elements.virtualContainer = document.createElement('div');
+        this.elements.virtualContainer.className = 'virtual-container';
+        this.elements.virtualContainer.style.position = 'relative';
+        this.elements.virtualContainer.style.overflow = 'hidden';
+        
+        // 创建表格元素
+        this.elements.table = document.createElement('table');
+        this.elements.table.className = 'excel-table';
+        this.elements.table.style.position = 'absolute';
+        this.elements.table.style.top = '0';
+        this.elements.table.style.left = '0';
+        
+        this.elements.virtualContainer.appendChild(this.elements.table);
+        this.elements.tableContainer.appendChild(this.elements.virtualContainer);
     }
     
     /**
@@ -67,11 +109,11 @@ class ExcelSimulator {
      */
     bindEvents() {
         // 工具栏事件
-        document.getElementById('addRow').addEventListener('click', () => this.addRow());
-        document.getElementById('addColumn').addEventListener('click', () => this.addColumn());
+        document.getElementById('addRow').addEventListener('click', () => this.addRows(10));
+        document.getElementById('addColumn').addEventListener('click', () => this.addColumns(5));
         document.getElementById('regenerate').addEventListener('click', () => this.regenerateTable());
         
-        // 表格容器事件 - 改为监听excel-wrapper的滚动
+        // 滚动事件
         const excelWrapper = document.querySelector('.excel-wrapper');
         excelWrapper.addEventListener('scroll', (e) => this.handleScroll(e));
         
@@ -89,30 +131,375 @@ class ExcelSimulator {
         
         // 右键菜单事件
         this.elements.contextMenu.addEventListener('click', (e) => this.handleMenuClick(e));
+        
+        // 窗口大小变化
+        window.addEventListener('resize', () => this.updateContainerSize());
     }
     
     /**
-     * 生成表格
+     * 计算行列偏移量
      */
-    generateTable() {
-        this.generateColumnHeaders();
-        this.generateRowHeaders();
-        this.generateTableBody();
-        // 初始化后确保所有尺寸正确
-        this.updateTableWidth();
+    calculateOffsets() {
+        // 计算行偏移量
+        this.rowOffsets = [0];
+        for (let i = 0; i < this.rowHeights.length; i++) {
+            this.rowOffsets.push(this.rowOffsets[i] + this.rowHeights[i]);
+        }
+        
+        // 计算列偏移量
+        this.columnOffsets = [0];
+        for (let i = 0; i < this.columnWidths.length; i++) {
+            this.columnOffsets.push(this.columnOffsets[i] + this.columnWidths[i]);
+        }
     }
     
     /**
-     * 生成列头
+     * 更新容器尺寸
      */
-    generateColumnHeaders() {
+    updateContainerSize() {
+        const wrapper = document.querySelector('.excel-wrapper');
+        this.containerWidth = wrapper.clientWidth - 60; // 减去行头宽度
+        this.containerHeight = wrapper.clientHeight - 30; // 减去列头高度
+        
+        // 更新虚拟容器尺寸
+        const totalHeight = this.rowOffsets[this.rowOffsets.length - 1];
+        const totalWidth = this.columnOffsets[this.columnOffsets.length - 1];
+        
+        this.elements.virtualContainer.style.width = totalWidth + 'px';
+        this.elements.virtualContainer.style.height = totalHeight + 'px';
+        
+        this.calculateVisibleRange();
+    }
+    
+    /**
+     * 计算可见范围
+     */
+    calculateVisibleRange() {
+        const wrapper = document.querySelector('.excel-wrapper');
+        this.scrollTop = wrapper.scrollTop;
+        this.scrollLeft = wrapper.scrollLeft;
+        
+        // 计算可见行范围
+        this.visibleStartRow = Math.max(0, this.findRowByOffset(this.scrollTop) - this.options.visibleRowBuffer);
+        this.visibleEndRow = Math.min(
+            this.rowHeights.length - 1,
+            this.findRowByOffset(this.scrollTop + this.containerHeight) + this.options.visibleRowBuffer
+        );
+        
+        // 计算可见列范围
+        this.visibleStartColumn = Math.max(0, this.findColumnByOffset(this.scrollLeft) - this.options.visibleColumnBuffer);
+        this.visibleEndColumn = Math.min(
+            this.columnWidths.length - 1,
+            this.findColumnByOffset(this.scrollLeft + this.containerWidth) + this.options.visibleColumnBuffer
+        );
+        
+        // 检查是否需要扩展行列
+        this.checkAndExpandGrid();
+    }
+    
+    /**
+     * 根据偏移量查找行索引
+     */
+    findRowByOffset(offset) {
+        let left = 0, right = this.rowOffsets.length - 1;
+        while (left < right) {
+            const mid = Math.floor((left + right) / 2);
+            if (this.rowOffsets[mid] <= offset) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        return Math.max(0, left - 1);
+    }
+    
+    /**
+     * 根据偏移量查找列索引
+     */
+    findColumnByOffset(offset) {
+        let left = 0, right = this.columnOffsets.length - 1;
+        while (left < right) {
+            const mid = Math.floor((left + right) / 2);
+            if (this.columnOffsets[mid] <= offset) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        return Math.max(0, left - 1);
+    }
+    
+    /**
+     * 检查并扩展网格
+     */
+    checkAndExpandGrid() {
+        let needsUpdate = false;
+        
+        // 检查是否需要添加更多行
+        if (this.visibleEndRow >= this.rowHeights.length - 10 && this.rowHeights.length < this.options.maxRows) {
+            this.addRows(50);
+            needsUpdate = true;
+        }
+        
+        // 检查是否需要添加更多列
+        if (this.visibleEndColumn >= this.columnWidths.length - 5 && this.columnWidths.length < this.options.maxColumns) {
+            this.addColumns(20);
+            needsUpdate = true;
+        }
+        
+        if (needsUpdate) {
+            this.calculateOffsets();
+            this.updateContainerSize();
+        }
+    }
+    
+    /**
+     * 添加行
+     */
+    addRows(count) {
+        const startIndex = this.rowHeights.length;
+        for (let i = 0; i < count; i++) {
+            this.rowHeights.push(this.options.defaultRowHeight);
+        }
+        this.calculateOffsets();
+        this.updateRowHeaders();
+    }
+    
+    /**
+     * 添加列
+     */
+    addColumns(count) {
+        const startIndex = this.columnWidths.length;
+        for (let i = 0; i < count; i++) {
+            this.columnWidths.push(this.options.defaultColumnWidth);
+        }
+        this.calculateOffsets();
+        this.updateColumnHeaders();
+    }
+    
+    /**
+     * 处理滚动事件
+     */
+    handleScroll(e) {
+        // 使用 requestAnimationFrame 来节流滚动事件
+        if (this.scrollAnimationFrame) {
+            cancelAnimationFrame(this.scrollAnimationFrame);
+        }
+        
+        this.scrollAnimationFrame = requestAnimationFrame(() => {
+            this.calculateVisibleRange();
+            this.renderVisibleCells();
+            this.updateHeadersPosition();
+            
+            // 如果正在编辑，隐藏编辑器
+            if (this.editingCell) {
+                this.cellEditor.style.display = 'none';
+            }
+        });
+    }
+    
+    /**
+     * 渲染可见的单元格
+     */
+    renderVisibleCells() {
+        // 清空现有内容
+        this.elements.table.innerHTML = '';
+        
+        for (let row = this.visibleStartRow; row <= this.visibleEndRow; row++) {
+            for (let col = this.visibleStartColumn; col <= this.visibleEndColumn; col++) {
+                const td = document.createElement('td');
+                td.dataset.row = row;
+                td.dataset.column = col;
+                td.style.position = 'absolute';
+                td.style.left = this.columnOffsets[col] + 'px';
+                td.style.top = this.rowOffsets[row] + 'px';
+                td.style.width = this.columnWidths[col] + 'px';
+                td.style.height = this.rowHeights[row] + 'px';
+                
+                // 设置单元格内容
+                const cellKey = `${row}-${col}`;
+                const cellValue = this.data.get(cellKey) || '';
+                td.textContent = cellValue;
+                
+                // 应用选择样式
+                if (this.selectedCells.has(cellKey)) {
+                    td.classList.add(this.selectedCells.size === 1 ? 'selected' : 'multi-selected');
+                    // 如果是多选，应用智能边框
+                    if (this.selectedCells.size > 1) {
+                        this.applySmartBorders(td, row, col);
+                    }
+                }
+                
+                this.elements.table.appendChild(td);
+            }
+        }
+        
+        // 更新行首列首高亮
+        this.updateHeaderHighlights();
+    }
+    
+    /**
+     * 轻量级选择更新（不重建DOM）- 优化版
+     */
+    updateSelection() {
+        // 批量清除所有现有的选择样式
+        const allCells = this.elements.table.querySelectorAll('td');
+        
+        // 使用一次性样式重置以提高性能
+        allCells.forEach(cell => {
+            cell.className = cell.className.replace(/\b(selected|multi-selected)\b/g, '').trim();
+            // 重置边框样式
+            if (cell.style.borderTop) {
+                cell.style.borderTop = '';
+                cell.style.borderBottom = '';
+                cell.style.borderLeft = '';
+                cell.style.borderRight = '';
+            }
+        });
+        
+        // 如果没有选择，直接返回
+        if (this.selectedCells.size === 0) {
+            this.updateHeaderHighlights();
+            return;
+        }
+        
+        // 批量应用新的选择样式
+        const isMultiSelect = this.selectedCells.size > 1;
+        this.selectedCells.forEach(cellKey => {
+            const [row, col] = cellKey.split('-').map(Number);
+            const cell = this.elements.table.querySelector(`td[data-row="${row}"][data-column="${col}"]`);
+            if (cell) {
+                if (isMultiSelect) {
+                    cell.classList.add('multi-selected');
+                    this.applySmartBorders(cell, row, col);
+                } else {
+                    cell.classList.add('selected');
+                }
+            }
+        });
+        
+        // 更新行首列首高亮
+        this.updateHeaderHighlights();
+    }
+    
+    /**
+     * 为多选单元格应用智能边框（优化版）
+     */
+    applySmartBorders(td, row, col) {
+        // 只有在多选时才应用智能边框
+        if (this.selectedCells.size <= 1) return;
+        
+        // 检查相邻单元格是否也被选中
+        const topSelected = this.selectedCells.has(`${row-1}-${col}`);
+        const bottomSelected = this.selectedCells.has(`${row+1}-${col}`);
+        const leftSelected = this.selectedCells.has(`${row}-${col-1}`);
+        const rightSelected = this.selectedCells.has(`${row}-${col+1}`);
+        
+        // 设置边框样式 - 使用CSS类而不是内联样式以提高性能
+        const thickBorder = '2px solid #0078d4';  // 选区外边框
+        const thinBorder = '1px solid #dee2e6';   // 选区内边框（正常边框）
+        
+        // 批量设置边框以减少重排
+        const styles = {
+            borderTop: topSelected ? thinBorder : thickBorder,
+            borderBottom: bottomSelected ? thinBorder : thickBorder,
+            borderLeft: leftSelected ? thinBorder : thickBorder,
+            borderRight: rightSelected ? thinBorder : thickBorder
+        };
+        
+        Object.assign(td.style, styles);
+    }
+    
+    /**
+     * 更新行首列首高亮显示
+     */
+    updateHeaderHighlights() {
+        // 如果元素不存在，直接返回
+        if (!this.elements.rowHeaders || !this.elements.columnHeaders) {
+            return;
+        }
+        
+        // 获取选中单元格的行列索引
+        const selectedRows = new Set();
+        const selectedCols = new Set();
+        
+        this.selectedCells.forEach(cellKey => {
+            const [row, col] = cellKey.split('-').map(Number);
+            selectedRows.add(row);
+            selectedCols.add(col);
+        });
+        
+        // 清除所有行头高亮和选中样式
+        const allRowHeaders = this.elements.rowHeaders.querySelectorAll('.row-header');
+        allRowHeaders.forEach(header => {
+            header.classList.remove('cell-highlighted');
+            header.classList.remove('selected');
+        });
+        
+        // 清除所有列头高亮和选中样式
+        const allColHeaders = this.elements.columnHeaders.querySelectorAll('.column-header');
+        allColHeaders.forEach(header => {
+            header.classList.remove('cell-highlighted');
+            header.classList.remove('selected');
+        });
+        
+        // 高亮选中的行头
+        selectedRows.forEach(row => {
+            const rowHeader = this.elements.rowHeaders.querySelector(`[data-row="${row}"]`);
+            if (rowHeader) {
+                // 检查是否选中了整行
+                let isFullRowSelected = true;
+                for (let col = 0; col < this.columnWidths.length; col++) {
+                    if (!this.selectedCells.has(`${row}-${col}`)) {
+                        isFullRowSelected = false;
+                        break;
+                    }
+                }
+                // 如果整行都被选中，则添加selected类，否则添加cell-highlighted类
+                if (isFullRowSelected) {
+                    rowHeader.classList.add('selected');
+                } else {
+                    rowHeader.classList.add('cell-highlighted');
+                }
+            }
+        });
+        
+        // 高亮选中的列头
+        selectedCols.forEach(col => {
+            const colHeader = this.elements.columnHeaders.querySelector(`[data-column="${col}"]`);
+            if (colHeader) {
+                // 检查是否选中了整列
+                let isFullColSelected = true;
+                for (let row = 0; row < this.rowHeights.length; row++) {
+                    if (!this.selectedCells.has(`${row}-${col}`)) {
+                        isFullColSelected = false;
+                        break;
+                    }
+                }
+                // 如果整列都被选中，则添加selected类，否则添加cell-highlighted类
+                if (isFullColSelected) {
+                    colHeader.classList.add('selected');
+                } else {
+                    colHeader.classList.add('cell-highlighted');
+                }
+            }
+        });
+    }
+    
+    /**
+     * 更新列头
+     */
+    updateColumnHeaders() {
         this.elements.columnHeaders.innerHTML = '';
         
-        for (let i = 0; i < this.options.columns; i++) {
+        for (let i = this.visibleStartColumn; i <= this.visibleEndColumn; i++) {
             const header = document.createElement('div');
             header.className = 'column-header';
             header.textContent = this.getColumnName(i);
+            header.style.position = 'absolute';
+            header.style.left = this.columnOffsets[i] + 'px';
             header.style.width = this.columnWidths[i] + 'px';
+            header.style.height = '30px';
             header.dataset.column = i;
             
             // 添加调整手柄
@@ -123,18 +510,24 @@ class ExcelSimulator {
             
             this.elements.columnHeaders.appendChild(header);
         }
+        
+        // 设置列头容器总宽度
+        this.elements.columnHeaders.style.width = this.columnOffsets[this.columnOffsets.length - 1] + 'px';
     }
     
     /**
-     * 生成行头
+     * 更新行头
      */
-    generateRowHeaders() {
+    updateRowHeaders() {
         this.elements.rowHeaders.innerHTML = '';
         
-        for (let i = 0; i < this.options.rows; i++) {
+        for (let i = this.visibleStartRow; i <= this.visibleEndRow; i++) {
             const header = document.createElement('div');
             header.className = 'row-header';
             header.textContent = i + 1;
+            header.style.position = 'absolute';
+            header.style.top = this.rowOffsets[i] + 'px';
+            header.style.width = '60px';
             header.style.height = this.rowHeights[i] + 'px';
             header.dataset.row = i;
             
@@ -146,68 +539,24 @@ class ExcelSimulator {
             
             this.elements.rowHeaders.appendChild(header);
         }
+        
+        // 设置行头容器总高度
+        this.elements.rowHeaders.style.height = this.rowOffsets[this.rowOffsets.length - 1] + 'px';
     }
     
     /**
-     * 生成表格主体
+     * 更新头部位置（滚动时同步）
      */
-    generateTableBody() {
-        this.elements.tableBody.innerHTML = '';
+    updateHeadersPosition() {
+        // 更新列头位置
+        this.updateColumnHeaders();
         
-        for (let row = 0; row < this.options.rows; row++) {
-            const tr = document.createElement('tr');
-            tr.dataset.row = row;
-            
-            for (let col = 0; col < this.options.columns; col++) {
-                const td = document.createElement('td');
-                td.dataset.row = row;
-                td.dataset.column = col;
-                td.style.width = this.columnWidths[col] + 'px';
-                td.style.height = this.rowHeights[row] + 'px';
-                
-                const cellKey = `${row}-${col}`;
-                const cellValue = this.data.get(cellKey) || '';
-                td.textContent = cellValue;
-                
-                tr.appendChild(td);
-            }
-            
-            this.elements.tableBody.appendChild(tr);
-        }
-        
-        // 设置表格总宽度以确保列对齐
-        this.updateTableWidth();
+        // 更新行头位置
+        this.updateRowHeaders();
     }
     
     /**
-     * 更新表格宽度
-     */
-    updateTableWidth() {
-        const totalWidth = this.columnWidths.reduce((sum, width) => sum + width, 0);
-        const totalHeight = this.rowHeights.reduce((sum, height) => sum + height, 0);
-        
-        // 更新列头容器宽度
-        this.elements.columnHeaders.style.width = totalWidth + 'px';
-        
-        // 更新行头容器高度
-        this.elements.rowHeaders.style.height = totalHeight + 'px';
-        
-        // 更新表格宽度和高度
-        const table = this.elements.tableBody.parentElement;
-        if (table) {
-            table.style.width = totalWidth + 'px';
-            table.style.height = totalHeight + 'px';
-        }
-        
-        // 确保所有行宽度一致
-        const rows = this.elements.tableBody.querySelectorAll('tr');
-        rows.forEach(row => {
-            row.style.width = totalWidth + 'px';
-        });
-    }
-
-    /**
-     * 获取列名（A, B, C, ..., Z, AA, AB, ...）
+     * 获取列名
      */
     getColumnName(index) {
         let result = '';
@@ -266,8 +615,10 @@ class ExcelSimulator {
                 this.startEditing(row, col);
             } else {
                 this.selectCell(row, col, e.ctrlKey, e.shiftKey);
-                this.isSelecting = true;
-                this.selectionStart = { row, col };
+                if (!e.shiftKey) {
+                    this.isSelecting = true;
+                    this.selectionStart = { row, col };
+                }
             }
             e.preventDefault();
         }
@@ -278,7 +629,6 @@ class ExcelSimulator {
      */
     handleMouseMove(e) {
         if (this.isResizing) {
-            // 使用requestAnimationFrame节流，避免过度频繁的DOM操作
             if (this.resizeAnimationFrame) {
                 cancelAnimationFrame(this.resizeAnimationFrame);
             }
@@ -293,7 +643,15 @@ class ExcelSimulator {
             if (target.tagName === 'TD') {
                 const row = parseInt(target.dataset.row);
                 const col = parseInt(target.dataset.column);
-                this.extendSelection(this.selectionStart.row, this.selectionStart.col, row, col);
+                
+                // 使用节流机制优化拖拽选择性能
+                if (this.selectionAnimationFrame) {
+                    cancelAnimationFrame(this.selectionAnimationFrame);
+                }
+                this.selectionAnimationFrame = requestAnimationFrame(() => {
+                    this.extendSelection(this.selectionStart.row, this.selectionStart.col, row, col);
+                    this.selectionAnimationFrame = null;
+                });
             }
         }
     }
@@ -304,6 +662,7 @@ class ExcelSimulator {
     handleMouseUp(e) {
         if (this.isResizing) {
             this.stopResize();
+            return;
         }
         
         this.isSelecting = false;
@@ -318,116 +677,48 @@ class ExcelSimulator {
         this.resizeType = type;
         this.resizeIndex = index;
         document.body.style.cursor = type === 'column' ? 'col-resize' : 'row-resize';
-        
-        // 阻止页面滚动和其他交互
         document.body.style.userSelect = 'none';
-        
-        // 缓存需要操作的DOM元素，避免重复查询
-        this.cacheResizeElements();
-        
-        // 记录开始resize时的滚动位置，用于调试
-        if (type === 'column') {
-            this.resizeStartScrollLeft = this.elements.tableContainer.scrollLeft;
-        } else {
-            this.resizeStartScrollTop = this.elements.tableContainer.scrollTop;
-        }
-    }
-    
-    /**
-     * 缓存resize时需要操作的DOM元素
-     */
-    cacheResizeElements() {
-        if (this.resizeType === 'column') {
-            this.cachedResizeElements = {
-                header: this.elements.columnHeaders.querySelector(`[data-column="${this.resizeIndex}"]`),
-                cells: this.elements.tableBody.querySelectorAll(`td[data-column="${this.resizeIndex}"]`)
-            };
-        } else if (this.resizeType === 'row') {
-            this.cachedResizeElements = {
-                header: this.elements.rowHeaders.querySelector(`[data-row="${this.resizeIndex}"]`),
-                row: this.elements.tableBody.querySelector(`tr[data-row="${this.resizeIndex}"]`)
-            };
-        }
     }
     
     /**
      * 执行调整大小
      */
     performResize(e) {
-        if (!this.isResizing || !this.cachedResizeElements) return;
+        if (!this.isResizing) return;
         
         if (this.resizeType === 'column') {
-            // 获取excel-wrapper的滚动位置
-            const excelWrapper = document.querySelector('.excel-wrapper');
-            const scrollLeft = excelWrapper.scrollLeft;
+            // 获取当前正在调整的列头元素
+            const currentColumnHeader = this.elements.columnHeaders.querySelector(`[data-column="${this.resizeIndex}"]`);
+            if (!currentColumnHeader) return;
             
-            // 使用列头容器作为基准，因为resize手柄在列头中
-            const headerRect = this.elements.columnHeaders.getBoundingClientRect();
+            // 获取列头的当前位置和鼠标位置
+            const headerRect = currentColumnHeader.getBoundingClientRect();
             
-            // 计算鼠标在列头容器中的位置（考虑滚动偏移）
-            const mouseXInHeader = e.clientX - headerRect.left + scrollLeft;
-            
-            // 计算当前要调整的列的起始位置
-            let columnStartX = 0;
-            for (let i = 0; i < this.resizeIndex; i++) {
-                columnStartX += this.columnWidths[i];
-            }
-            
-            // 计算新的列宽（确保最小宽度）
-            const newWidth = Math.max(30, mouseXInHeader - columnStartX);
+            // 计算新的列宽：鼠标X位置减去当前列头的左侧位置
+            const newWidth = Math.max(30, e.clientX - headerRect.left);
             this.columnWidths[this.resizeIndex] = newWidth;
             
-            // 直接更新缓存的DOM元素，不调用updateColumnWidths避免重复查询
-            this.updateCachedColumnElements(newWidth);
+            this.calculateOffsets();
+            this.updateContainerSize();
+            this.renderVisibleCells();
+            this.updateColumnHeaders();
             
         } else if (this.resizeType === 'row') {
-            // 获取当前正在调整的行头元素的位置
-            const headerRect = this.cachedResizeElements.header.getBoundingClientRect();
+            // 获取当前正在调整的行头元素
+            const currentRowHeader = this.elements.rowHeaders.querySelector(`[data-row="${this.resizeIndex}"]`);
+            if (!currentRowHeader) return;
+            
+            // 获取行头的当前位置和鼠标位置
+            const headerRect = currentRowHeader.getBoundingClientRect();
             
             // 计算新的行高：鼠标Y位置减去当前行头的顶部位置
             const newHeight = Math.max(20, e.clientY - headerRect.top);
             this.rowHeights[this.resizeIndex] = newHeight;
             
-            // 直接更新缓存的DOM元素，不调用updateRowHeights避免重复查询
-            this.updateCachedRowElements(newHeight);
-        }
-    }
-    
-    /**
-     * 更新缓存的列元素（性能优化版本）
-     */
-    updateCachedColumnElements(width) {
-        const widthPx = width + 'px';
-        
-        // 更新列头
-        if (this.cachedResizeElements.header) {
-            this.cachedResizeElements.header.style.width = widthPx;
-        }
-        
-        // 更新该列的所有单元格
-        this.cachedResizeElements.cells.forEach(cell => {
-            cell.style.width = widthPx;
-        });
-    }
-    
-    /**
-     * 更新缓存的行元素（性能优化版本）
-     */
-    updateCachedRowElements(height) {
-        const heightPx = height + 'px';
-        
-        // 更新行头
-        if (this.cachedResizeElements.header) {
-            this.cachedResizeElements.header.style.height = heightPx;
-        }
-        
-        // 更新该行及其所有单元格
-        if (this.cachedResizeElements.row) {
-            this.cachedResizeElements.row.style.height = heightPx;
-            const cells = this.cachedResizeElements.row.querySelectorAll('td');
-            cells.forEach(cell => {
-                cell.style.height = heightPx;
-            });
+            this.calculateOffsets();
+            this.updateContainerSize();
+            this.renderVisibleCells();
+            this.updateRowHeaders();
         }
     }
     
@@ -435,130 +726,16 @@ class ExcelSimulator {
      * 停止调整大小
      */
     stopResize() {
-        if (!this.isResizing) return;
-        
-        // 取消动画帧
         if (this.resizeAnimationFrame) {
             cancelAnimationFrame(this.resizeAnimationFrame);
             this.resizeAnimationFrame = null;
         }
         
-        // 在resize结束时才更新总尺寸，避免频繁重计算
-        if (this.resizeType === 'column') {
-            this.updateTableWidth();
-        } else if (this.resizeType === 'row') {
-            // 只在resize结束时更新总高度
-            const totalHeight = this.rowHeights.reduce((sum, height) => sum + height, 0);
-            this.elements.rowHeaders.style.height = totalHeight + 'px';
-            
-            const table = this.elements.tableBody.parentElement;
-            if (table) {
-                table.style.height = totalHeight + 'px';
-            }
-        }
-        
         this.isResizing = false;
         this.resizeType = null;
         this.resizeIndex = null;
-        this.cachedResizeElements = null; // 清除缓存
         document.body.style.cursor = 'default';
         document.body.style.userSelect = '';
-        
-        // 清除调试信息
-        this.resizeStartScrollLeft = null;
-        this.resizeStartScrollTop = null;
-    }
-    
-    /**
-     * 更新列宽
-     */
-    updateColumnWidths() {
-        // 更新特定列的列头宽度
-        const columnHeader = this.elements.columnHeaders.querySelector(`[data-column="${this.resizeIndex}"]`);
-        if (columnHeader) {
-            columnHeader.style.width = this.columnWidths[this.resizeIndex] + 'px';
-        }
-        
-        // 更新特定列的所有单元格宽度
-        const cells = this.elements.tableBody.querySelectorAll(`td[data-column="${this.resizeIndex}"]`);
-        cells.forEach(cell => {
-            cell.style.width = this.columnWidths[this.resizeIndex] + 'px';
-        });
-        
-        // 更新表格总宽度以保持对齐
-        this.updateTableWidth();
-    }
-    
-    /**
-     * 更新行高
-     */
-    updateRowHeights() {
-        // 更新特定行的行头高度
-        const rowHeader = this.elements.rowHeaders.querySelector(`[data-row="${this.resizeIndex}"]`);
-        if (rowHeader) {
-            rowHeader.style.height = this.rowHeights[this.resizeIndex] + 'px';
-        }
-        
-        // 更新特定行的所有单元格高度
-        const row = this.elements.tableBody.querySelector(`tr[data-row="${this.resizeIndex}"]`);
-        if (row) {
-            const cells = row.querySelectorAll('td');
-            cells.forEach(cell => {
-                cell.style.height = this.rowHeights[this.resizeIndex] + 'px';
-            });
-            // 同时更新行的高度
-            row.style.height = this.rowHeights[this.resizeIndex] + 'px';
-        }
-        
-        // 重新计算并更新行头容器总高度
-        const totalHeight = this.rowHeights.reduce((sum, height) => sum + height, 0);
-        this.elements.rowHeaders.style.height = totalHeight + 'px';
-        
-        // 更新表格总高度
-        const table = this.elements.tableBody.parentElement;
-        if (table) {
-            table.style.height = totalHeight + 'px';
-        }
-    }
-    
-    /**
-     * 更新所有列宽（用于表格重新生成）
-     */
-    updateAllColumnWidths() {
-        // 更新所有列头宽度
-        const columnHeaders = this.elements.columnHeaders.querySelectorAll('.column-header');
-        columnHeaders.forEach((header, index) => {
-            header.style.width = this.columnWidths[index] + 'px';
-        });
-        
-        // 更新所有表格单元格宽度
-        const rows = this.elements.tableBody.querySelectorAll('tr');
-        rows.forEach(row => {
-            const cells = row.querySelectorAll('td');
-            cells.forEach((cell, index) => {
-                cell.style.width = this.columnWidths[index] + 'px';
-            });
-        });
-    }
-    
-    /**
-     * 更新所有行高（用于表格重新生成）
-     */
-    updateAllRowHeights() {
-        // 更新所有行头高度
-        const rowHeaders = this.elements.rowHeaders.querySelectorAll('.row-header');
-        rowHeaders.forEach((header, index) => {
-            header.style.height = this.rowHeights[index] + 'px';
-        });
-        
-        // 更新所有表格行高度
-        const rows = this.elements.tableBody.querySelectorAll('tr');
-        rows.forEach((row, index) => {
-            const cells = row.querySelectorAll('td');
-            cells.forEach(cell => {
-                cell.style.height = this.rowHeights[index] + 'px';
-            });
-        });
     }
     
     /**
@@ -566,25 +743,27 @@ class ExcelSimulator {
      */
     selectCell(row, col, ctrlKey = false, shiftKey = false) {
         if (!ctrlKey && !shiftKey) {
-            this.clearSelection();
+            this.selectedCells.clear();
+            // 清除行首和列首的selected样式
+            const allRowHeaders = this.elements.rowHeaders.querySelectorAll('.row-header');
+            allRowHeaders.forEach(header => {
+                header.classList.remove('selected');
+            });
+            
+            const allColHeaders = this.elements.columnHeaders.querySelectorAll('.column-header');
+            allColHeaders.forEach(header => {
+                header.classList.remove('selected');
+            });
         }
         
         const cellKey = `${row}-${col}`;
         
         if (shiftKey && this.selectedCells.size > 0) {
-            // Shift选择：选择范围
+            // 扩展选择
             const firstSelected = Array.from(this.selectedCells)[0];
             const [startRow, startCol] = firstSelected.split('-').map(Number);
             this.selectRange(startRow, startCol, row, col);
-        } else if (ctrlKey) {
-            // Ctrl选择：切换选择状态
-            if (this.selectedCells.has(cellKey)) {
-                this.selectedCells.delete(cellKey);
-            } else {
-                this.selectedCells.add(cellKey);
-            }
         } else {
-            // 普通选择
             this.selectedCells.add(cellKey);
         }
         
@@ -595,7 +774,7 @@ class ExcelSimulator {
      * 选择范围
      */
     selectRange(startRow, startCol, endRow, endCol) {
-        this.clearSelection();
+        this.selectedCells.clear();
         
         const minRow = Math.min(startRow, endRow);
         const maxRow = Math.max(startRow, endRow);
@@ -622,10 +801,21 @@ class ExcelSimulator {
      */
     selectColumn(colIndex, ctrlKey = false) {
         if (!ctrlKey) {
-            this.clearSelection();
+            this.selectedCells.clear();
+            // 清除之前选中的行头样式
+            const allRowHeaders = this.elements.rowHeaders.querySelectorAll('.row-header');
+            allRowHeaders.forEach(header => {
+                header.classList.remove('selected');
+            });
         }
         
-        for (let row = 0; row < this.options.rows; row++) {
+        // 为选中的列头添加selected样式
+        const colHeader = this.elements.columnHeaders.querySelector(`[data-column="${colIndex}"]`);
+        if (colHeader) {
+            colHeader.classList.add('selected');
+        }
+        
+        for (let row = 0; row < this.rowHeights.length; row++) {
             this.selectedCells.add(`${row}-${colIndex}`);
         }
         
@@ -637,133 +827,25 @@ class ExcelSimulator {
      */
     selectRow(rowIndex, ctrlKey = false) {
         if (!ctrlKey) {
-            this.clearSelection();
+            this.selectedCells.clear();
+            // 清除之前选中的列头样式
+            const allColHeaders = this.elements.columnHeaders.querySelectorAll('.column-header');
+            allColHeaders.forEach(header => {
+                header.classList.remove('selected');
+            });
         }
         
-        for (let col = 0; col < this.options.columns; col++) {
+        // 为选中的行头添加selected样式
+        const rowHeader = this.elements.rowHeaders.querySelector(`[data-row="${rowIndex}"]`);
+        if (rowHeader) {
+            rowHeader.classList.add('selected');
+        }
+        
+        for (let col = 0; col < this.columnWidths.length; col++) {
             this.selectedCells.add(`${rowIndex}-${col}`);
         }
         
         this.updateSelection();
-    }
-    
-    /**
-     * 清除选择
-     */
-    clearSelection() {
-        this.selectedCells.clear();
-    }
-    
-    /**
-     * 更新选择显示
-     */
-    updateSelection() {
-        // 清除所有选择样式
-        const allCells = this.elements.tableBody.querySelectorAll('td');
-        allCells.forEach(cell => {
-            cell.classList.remove('selected', 'multi-selected');
-        });
-        
-        // 应用新的选择样式
-        let isFirst = true;
-        this.selectedCells.forEach(cellKey => {
-            const [row, col] = cellKey.split('-').map(Number);
-            const cell = this.elements.tableBody.querySelector(`td[data-row="${row}"][data-column="${col}"]`);
-            if (cell) {
-                if (isFirst && this.selectedCells.size === 1) {
-                    cell.classList.add('selected');
-                    isFirst = false;
-                } else {
-                    cell.classList.add('multi-selected');
-                }
-            }
-        });
-        
-        // 自动更新头部选择状态
-        this.updateHeaderSelection();
-    }
-    
-    /**
-     * 更新行列头选择状态
-     */
-    updateHeaderSelection() {
-        // 清除所有头部选择和高亮
-        const columnHeaders = this.elements.columnHeaders.querySelectorAll('.column-header');
-        const rowHeaders = this.elements.rowHeaders.querySelectorAll('.row-header');
-        
-        columnHeaders.forEach(header => {
-            header.classList.remove('selected', 'cell-highlighted');
-        });
-        rowHeaders.forEach(header => {
-            header.classList.remove('selected', 'cell-highlighted');
-        });
-        
-        // 检查是否选择了整列或整行
-        const selectedColumns = new Set();
-        const selectedRows = new Set();
-        
-        this.selectedCells.forEach(cellKey => {
-            const [row, col] = cellKey.split('-').map(Number);
-            selectedColumns.add(col);
-            selectedRows.add(row);
-        });
-        
-        // 高亮完全选中的列
-        selectedColumns.forEach(col => {
-            let isFullColumn = true;
-            for (let row = 0; row < this.options.rows; row++) {
-                if (!this.selectedCells.has(`${row}-${col}`)) {
-                    isFullColumn = false;
-                    break;
-                }
-            }
-            if (isFullColumn) {
-                const header = this.elements.columnHeaders.querySelector(`[data-column="${col}"]`);
-                if (header) header.classList.add('selected');
-            } else {
-                // 如果不是完全选中，但有单元格被选中，添加高亮
-                const header = this.elements.columnHeaders.querySelector(`[data-column="${col}"]`);
-                if (header) header.classList.add('cell-highlighted');
-            }
-        });
-        
-        // 高亮完全选中的行
-        selectedRows.forEach(row => {
-            let isFullRow = true;
-            for (let col = 0; col < this.options.columns; col++) {
-                if (!this.selectedCells.has(`${row}-${col}`)) {
-                    isFullRow = false;
-                    break;
-                }
-            }
-            if (isFullRow) {
-                const header = this.elements.rowHeaders.querySelector(`[data-row="${row}"]`);
-                if (header) header.classList.add('selected');
-            } else {
-                // 如果不是完全选中，但有单元格被选中，添加高亮
-                const header = this.elements.rowHeaders.querySelector(`[data-row="${row}"]`);
-                if (header) header.classList.add('cell-highlighted');
-            }
-        });
-    }
-    
-    /**
-     * 更新单元格对应的行首列首高亮（已由updateHeaderSelection统一处理）
-     */
-    updateCellHighlight(row, col) {
-        // 这个方法现在主要由updateHeaderSelection处理
-        // 保留此方法以便向后兼容
-    }
-    
-    /**
-     * 清除单元格对应的行首列首高亮
-     */
-    clearCellHighlight() {
-        const columnHeaders = this.elements.columnHeaders.querySelectorAll('.column-header');
-        const rowHeaders = this.elements.rowHeaders.querySelectorAll('.row-header');
-        
-        columnHeaders.forEach(header => header.classList.remove('cell-highlighted'));
-        rowHeaders.forEach(header => header.classList.remove('cell-highlighted'));
     }
     
     /**
@@ -774,7 +856,7 @@ class ExcelSimulator {
             this.finishEditing();
         }
         
-        const cell = this.elements.tableBody.querySelector(`td[data-row="${row}"][data-column="${col}"]`);
+        const cell = this.elements.table.querySelector(`td[data-row="${row}"][data-column="${col}"]`);
         if (!cell) return;
         
         this.editingCell = { row, col, cell };
@@ -782,7 +864,7 @@ class ExcelSimulator {
         // 获取单元格在页面中的位置和尺寸
         const rect = cell.getBoundingClientRect();
         
-        // 定位编辑器 - 稍微内缩以不遮挡边框
+        // 定位编辑器
         this.cellEditor.style.position = 'fixed';
         this.cellEditor.style.left = (rect.left + 1) + 'px';
         this.cellEditor.style.top = (rect.top + 1) + 'px';
@@ -815,8 +897,10 @@ class ExcelSimulator {
         // 保存数据
         if (value) {
             this.data.set(cellKey, value);
+            this.modifiedCells.add(cellKey);
         } else {
             this.data.delete(cellKey);
+            this.modifiedCells.delete(cellKey);
         }
         
         // 更新单元格显示
@@ -835,11 +919,6 @@ class ExcelSimulator {
         if (this.editingCell) return; // 编辑状态下不处理
         
         switch (e.key) {
-            case 'Delete':
-            case 'Backspace':
-                this.clearSelectedCells();
-                e.preventDefault();
-                break;
             case 'Enter':
                 if (this.selectedCells.size === 1) {
                     const cellKey = Array.from(this.selectedCells)[0];
@@ -848,31 +927,22 @@ class ExcelSimulator {
                 }
                 e.preventDefault();
                 break;
-            case 'F2':
-                if (this.selectedCells.size === 1) {
-                    const cellKey = Array.from(this.selectedCells)[0];
-                    const [row, col] = cellKey.split('-').map(Number);
-                    this.startEditing(row, col);
-                }
-                e.preventDefault();
+            case 'Delete':
+                this.clearSelectedCells();
                 break;
-            case 'c':
-                if (e.ctrlKey) {
-                    this.copySelectedCells();
-                    e.preventDefault();
-                }
-                break;
-            case 'v':
-                if (e.ctrlKey) {
-                    this.pasteClipboard();
-                    e.preventDefault();
-                }
-                break;
-            case 'a':
-                if (e.ctrlKey) {
-                    this.selectAll();
-                    e.preventDefault();
-                }
+            case 'Escape':
+                this.selectedCells.clear();
+                // 清除行首和列首的selected样式
+                const allRowHeaders = this.elements.rowHeaders.querySelectorAll('.row-header');
+                allRowHeaders.forEach(header => {
+                    header.classList.remove('selected');
+                });
+                
+                const allColHeaders = this.elements.columnHeaders.querySelectorAll('.column-header');
+                allColHeaders.forEach(header => {
+                    header.classList.remove('selected');
+                });
+                this.renderVisibleCells();
                 break;
         }
     }
@@ -910,77 +980,9 @@ class ExcelSimulator {
      */
     clearSelectedCells() {
         this.selectedCells.forEach(cellKey => {
-            const [row, col] = cellKey.split('-').map(Number);
             this.data.delete(cellKey);
-            
-            const cell = this.elements.tableBody.querySelector(`td[data-row="${row}"][data-column="${col}"]`);
-            if (cell) {
-                cell.textContent = '';
-            }
+            this.modifiedCells.delete(cellKey);
         });
-    }
-    
-    /**
-     * 复制选中单元格
-     */
-    copySelectedCells() {
-        const copyData = [];
-        this.selectedCells.forEach(cellKey => {
-            const [row, col] = cellKey.split('-').map(Number);
-            copyData.push({
-                row, col,
-                value: this.data.get(cellKey) || ''
-            });
-        });
-        
-        this.clipboard = copyData;
-        
-        // 显示复制状态
-        this.selectedCells.forEach(cellKey => {
-            const [row, col] = cellKey.split('-').map(Number);
-            const cell = this.elements.tableBody.querySelector(`td[data-row="${row}"][data-column="${col}"]`);
-            if (cell) {
-                cell.classList.add('copied');
-                setTimeout(() => cell.classList.remove('copied'), 1000);
-            }
-        });
-    }
-    
-    /**
-     * 粘贴剪贴板内容
-     */
-    pasteClipboard() {
-        if (!this.clipboard || this.selectedCells.size === 0) return;
-        
-        const firstSelected = Array.from(this.selectedCells)[0];
-        const [startRow, startCol] = firstSelected.split('-').map(Number);
-        
-        this.clipboard.forEach(item => {
-            const newRow = startRow + (item.row - this.clipboard[0].row);
-            const newCol = startCol + (item.col - this.clipboard[0].col);
-            
-            if (newRow < this.options.rows && newCol < this.options.columns) {
-                const cellKey = `${newRow}-${newCol}`;
-                this.data.set(cellKey, item.value);
-                
-                const cell = this.elements.tableBody.querySelector(`td[data-row="${newRow}"][data-column="${newCol}"]`);
-                if (cell) {
-                    cell.textContent = item.value;
-                }
-            }
-        });
-    }
-    
-    /**
-     * 选择全部
-     */
-    selectAll() {
-        this.clearSelection();
-        for (let row = 0; row < this.options.rows; row++) {
-            for (let col = 0; col < this.options.columns; col++) {
-                this.selectedCells.add(`${row}-${col}`);
-            }
-        }
         this.updateSelection();
     }
     
@@ -1046,6 +1048,81 @@ class ExcelSimulator {
     }
     
     /**
+     * 复制选中单元格
+     */
+    copySelectedCells() {
+        const copyData = [];
+        this.selectedCells.forEach(cellKey => {
+            const value = this.data.get(cellKey) || '';
+            copyData.push({ cellKey, value });
+        });
+        
+        this.clipboard = copyData;
+    }
+    
+    /**
+     * 粘贴剪贴板内容
+     */
+    pasteClipboard() {
+        if (!this.clipboard || this.selectedCells.size === 0) return;
+        
+        const firstSelected = Array.from(this.selectedCells)[0];
+        const [startRow, startCol] = firstSelected.split('-').map(Number);
+        
+        this.clipboard.forEach(item => {
+            const [origRow, origCol] = item.cellKey.split('-').map(Number);
+            const newRow = startRow;
+            const newCol = startCol;
+            const newCellKey = `${newRow}-${newCol}`;
+            
+            if (item.value) {
+                this.data.set(newCellKey, item.value);
+                this.modifiedCells.add(newCellKey);
+            }
+        });
+        
+        this.renderVisibleCells();
+    }
+    
+    /**
+     * 重新生成表格
+     */
+    regenerateTable() {
+        const newRows = parseInt(document.getElementById('rowCount').value);
+        const newCols = parseInt(document.getElementById('colCount').value);
+        
+        if (newRows > 0 && newCols > 0 && newRows <= 10000 && newCols <= 1000) {
+            // 清除所有数据和状态
+            this.data.clear();
+            this.modifiedCells.clear();
+            this.selectedCells.clear();
+            this.clipboard = null;
+            
+            // 重置行列数量
+            this.rowHeights = new Array(Math.max(newRows, this.options.minRows)).fill(this.options.defaultRowHeight);
+            this.columnWidths = new Array(Math.max(newCols, this.options.minColumns)).fill(this.options.defaultColumnWidth);
+            
+            // 停止当前编辑
+            if (this.editingCell) {
+                this.cancelEditing();
+            }
+            
+            // 重置滚动位置到左上角
+            const wrapper = document.querySelector('.excel-wrapper');
+            wrapper.scrollTop = 0;
+            wrapper.scrollLeft = 0;
+            this.scrollTop = 0;
+            this.scrollLeft = 0;
+            
+            this.calculateOffsets();
+            this.updateContainerSize();
+            this.calculateVisibleRange();
+            this.renderVisibleCells();
+            this.updateHeadersPosition();
+        }
+    }
+    
+    /**
      * 获取选中的行
      */
     getSelectedRow() {
@@ -1069,7 +1146,7 @@ class ExcelSimulator {
     insertRow(rowIndex, position = 'below') {
         const insertIndex = position === 'above' ? rowIndex : rowIndex + 1;
         
-        // 更新数据
+        // 更新数据 - 需要调整现有数据的行索引
         const newData = new Map();
         this.data.forEach((value, key) => {
             const [row, col] = key.split('-').map(Number);
@@ -1081,41 +1158,77 @@ class ExcelSimulator {
         });
         this.data = newData;
         
-        // 更新尺寸数组
-        this.rowHeights.splice(insertIndex, 0, this.options.defaultRowHeight);
-        this.options.rows++;
+        // 更新修改过的单元格记录
+        const newModifiedCells = new Set();
+        this.modifiedCells.forEach(cellKey => {
+            const [row, col] = cellKey.split('-').map(Number);
+            if (row >= insertIndex) {
+                newModifiedCells.add(`${row + 1}-${col}`);
+            } else {
+                newModifiedCells.add(cellKey);
+            }
+        });
+        this.modifiedCells = newModifiedCells;
         
-        // 重新生成表格
-        this.generateTable();
+        // 插入新行高度
+        this.rowHeights.splice(insertIndex, 0, this.options.defaultRowHeight);
+        
+        // 重新计算偏移量并渲染
+        this.calculateOffsets();
+        this.updateContainerSize();
+        this.calculateVisibleRange();
+        this.renderVisibleCells();
+        this.updateHeadersPosition();
     }
     
     /**
      * 删除行
      */
     deleteRow(rowIndex) {
-        if (this.options.rows <= 1) return;
+        if (this.rowHeights.length <= 1) return; // 至少保留一行
         
-        // 更新数据
+        // 更新数据 - 删除该行数据并调整其他行索引
         const newData = new Map();
         this.data.forEach((value, key) => {
             const [row, col] = key.split('-').map(Number);
-            if (row < rowIndex) {
-                newData.set(key, value);
+            if (row === rowIndex) {
+                // 删除该行的数据
+                return;
             } else if (row > rowIndex) {
                 newData.set(`${row - 1}-${col}`, value);
+            } else {
+                newData.set(key, value);
             }
         });
         this.data = newData;
         
-        // 更新尺寸数组
+        // 更新修改过的单元格记录
+        const newModifiedCells = new Set();
+        this.modifiedCells.forEach(cellKey => {
+            const [row, col] = cellKey.split('-').map(Number);
+            if (row === rowIndex) {
+                // 删除该行的记录
+                return;
+            } else if (row > rowIndex) {
+                newModifiedCells.add(`${row - 1}-${col}`);
+            } else {
+                newModifiedCells.add(cellKey);
+            }
+        });
+        this.modifiedCells = newModifiedCells;
+        
+        // 删除行高度
         this.rowHeights.splice(rowIndex, 1);
-        this.options.rows--;
         
         // 清除选择
-        this.clearSelection();
+        this.selectedCells.clear();
         
-        // 重新生成表格
-        this.generateTable();
+        // 重新计算偏移量并渲染
+        this.calculateOffsets();
+        this.updateContainerSize();
+        this.calculateVisibleRange();
+        this.renderVisibleCells();
+        this.updateHeadersPosition();
     }
     
     /**
@@ -1124,7 +1237,7 @@ class ExcelSimulator {
     insertColumn(colIndex, position = 'right') {
         const insertIndex = position === 'left' ? colIndex : colIndex + 1;
         
-        // 更新数据
+        // 更新数据 - 需要调整现有数据的列索引
         const newData = new Map();
         this.data.forEach((value, key) => {
             const [row, col] = key.split('-').map(Number);
@@ -1136,101 +1249,85 @@ class ExcelSimulator {
         });
         this.data = newData;
         
-        // 更新尺寸数组
-        this.columnWidths.splice(insertIndex, 0, this.options.defaultColumnWidth);
-        this.options.columns++;
+        // 更新修改过的单元格记录
+        const newModifiedCells = new Set();
+        this.modifiedCells.forEach(cellKey => {
+            const [row, col] = cellKey.split('-').map(Number);
+            if (col >= insertIndex) {
+                newModifiedCells.add(`${row}-${col + 1}`);
+            } else {
+                newModifiedCells.add(cellKey);
+            }
+        });
+        this.modifiedCells = newModifiedCells;
         
-        // 重新生成表格
-        this.generateTable();
+        // 插入新列宽度
+        this.columnWidths.splice(insertIndex, 0, this.options.defaultColumnWidth);
+        
+        // 重新计算偏移量并渲染
+        this.calculateOffsets();
+        this.updateContainerSize();
+        this.calculateVisibleRange();
+        this.renderVisibleCells();
+        this.updateHeadersPosition();
     }
     
     /**
      * 删除列
      */
     deleteColumn(colIndex) {
-        if (this.options.columns <= 1) return;
+        if (this.columnWidths.length <= 1) return; // 至少保留一列
         
-        // 更新数据
+        // 更新数据 - 删除该列数据并调整其他列索引
         const newData = new Map();
         this.data.forEach((value, key) => {
             const [row, col] = key.split('-').map(Number);
-            if (col < colIndex) {
-                newData.set(key, value);
+            if (col === colIndex) {
+                // 删除该列的数据
+                return;
             } else if (col > colIndex) {
                 newData.set(`${row}-${col - 1}`, value);
+            } else {
+                newData.set(key, value);
             }
         });
         this.data = newData;
         
-        // 更新尺寸数组
+        // 更新修改过的单元格记录
+        const newModifiedCells = new Set();
+        this.modifiedCells.forEach(cellKey => {
+            const [row, col] = cellKey.split('-').map(Number);
+            if (col === colIndex) {
+                // 删除该列的记录
+                return;
+            } else if (col > colIndex) {
+                newModifiedCells.add(`${row}-${col - 1}`);
+            } else {
+                newModifiedCells.add(cellKey);
+            }
+        });
+        this.modifiedCells = newModifiedCells;
+        
+        // 删除列宽度
         this.columnWidths.splice(colIndex, 1);
-        this.options.columns--;
         
         // 清除选择
-        this.clearSelection();
+        this.selectedCells.clear();
         
-        // 重新生成表格
-        this.generateTable();
-    }
-    
-    /**
-     * 添加行
-     */
-    addRow() {
-        this.rowHeights.push(this.options.defaultRowHeight);
-        this.options.rows++;
-        this.generateTable();
-    }
-    
-    /**
-     * 添加列
-     */
-    addColumn() {
-        this.columnWidths.push(this.options.defaultColumnWidth);
-        this.options.columns++;
-        this.generateTable();
-    }
-    
-    /**
-     * 重新生成表格
-     */
-    regenerateTable() {
-        const newRows = parseInt(document.getElementById('rowCount').value);
-        const newCols = parseInt(document.getElementById('colCount').value);
-        
-        if (newRows > 0 && newCols > 0 && newRows <= 1000 && newCols <= 100) {
-            this.options.rows = newRows;
-            this.options.columns = newCols;
-            
-            // 调整尺寸数组
-            this.rowHeights = new Array(newRows).fill(this.options.defaultRowHeight);
-            this.columnWidths = new Array(newCols).fill(this.options.defaultColumnWidth);
-            
-            // 清除数据和选择
-            this.data.clear();
-            this.clearSelection();
-            
-            // 重新生成表格
-            this.generateTable();
-        }
-    }
-    
-    /**
-     * 处理滚动同步
-     */
-    handleScroll(e) {
-        // 如果正在编辑，隐藏编辑器或重新定位
-        if (this.editingCell) {
-            this.finishEditing();
-        }
+        // 重新计算偏移量并渲染
+        this.calculateOffsets();
+        this.updateContainerSize();
+        this.calculateVisibleRange();
+        this.renderVisibleCells();
+        this.updateHeadersPosition();
     }
 }
 
-// 初始化Excel模拟器
+// 初始化虚拟Excel模拟器
 document.addEventListener('DOMContentLoaded', () => {
     const container = document.querySelector('.excel-container');
-    window.excelSimulator = new ExcelSimulator(container, {
-        rows: 100,
-        columns: 100
+    window.virtualExcelSimulator = new VirtualExcelSimulator(container, {
+        minRows: 100,
+        minColumns: 26
     });
 });
